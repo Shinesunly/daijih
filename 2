@@ -1,0 +1,166 @@
+public class UserCF {
+    /**
+     * 方法描述: 推荐岗位id列表
+     * @param userId 当前用户
+     * @param list   用户岗位评分数据
+     * @return {@link List<Integer>}
+     */
+    public static List<Integer> recommend(Integer userId, List<RelateDTO> list) {
+        // 按用户分组
+        Map<Integer,List<RelateDTO>>userMap= list.stream().collect(Collectors.groupingBy(RelateDTO::getUseId));
+        // 获取其他用户与当前用户的关系值
+        Map<Integer,Double>userDisMap = CoreMath.computeNeighbor(userId, userMap, 0);
+        if (CollectionUtil.isEmpty(userDisMap)) {
+            return Collections.emptyList();
+        }
+        // 获取关系最近的用户
+        double maxValue = Collections.max(userDisMap.values());
+        Set<Integer>userIds=userDisMap.entrySet().stream().filter(e-> e.getValue() == maxValue).map(Map.Entry::getKey).collect(Collectors.toSet());
+        // 取关系最近的用户
+        Integer nearestUserId = userIds.stream().findAny().orElse(null);
+        if (nearestUserId == null) {
+            return Collections.emptyList();
+        }
+        // 最近邻用户有关联的岗位列表
+List<Integer>neighborItems=userMap.get(nearestUserId).stream().map(RelateDTO::getPositionId).collect(Collectors.toList());
+        // 指定用户关联的岗位列表
+        List<Integer>userItems= userMap.get(userId).stream().map(RelateDTO::getPositionId).collect(Collectors.toList());
+        // 找到最近邻有关联的，但是该用户没关联的岗位
+        neighborItems.removeAll(userItems);
+        return neighborItems;
+    }
+}
+/**
+ * 核心算法
+* @version 1.0
+ */
+public class CoreMath {
+    /**
+     * 计算相关系数并排序
+     */
+    public static Map<Integer, Double> computeNeighbor(Integer key, Map<Integer, List<RelateDTO>> map, int type) {
+        Map<Integer, Double> distMap = new TreeMap<>();
+        List<RelateDTO> userItems = map.get(key);
+        if (CollectionUtil.isNotEmpty(userItems)) {
+            map.forEach((k, v) -> {
+                //排除此用户
+                if (!k.equals(key)) {
+                    //关系系数
+                    double coefficient = relateDist(v, userItems, type);
+                    //关系距离
+                    double distance = Math.abs(coefficient);
+                    distMap.put(k, distance);
+                }
+            });
+        }
+        return distMap;
+    }
+    /**
+     * 计算两个序列间的相关系数
+     */
+    private static double relateDist(List<RelateDTO> xList, List<RelateDTO> yList, int type) {
+        List<Integer> xs = new ArrayList<>();
+        List<Integer> ys = new ArrayList<>();
+        xList.forEach(x -> yList.forEach(y -> {
+            if (type == 0) {
+                if (x.getPositionId().equals(y.getPositionId())) {
+                    xs.add(x.getIndex());
+                    ys.add(y.getIndex());
+                }
+            } else {
+                if (x.getUseId().equals(y.getUseId())) {
+                    xs.add(x.getIndex());
+                    ys.add(y.getIndex());
+                }
+            }
+        }));
+        return getRelate(xs, ys);
+    }
+    /**
+     * 方法描述: 皮尔森（pearson）相关系数计算
+     * @param xs x集合
+     * @param ys y集合
+     * @Return {@link double}
+     */
+    public static double getRelate(List<Integer> xs, List<Integer> ys) {
+        int n = xs.size();
+        //至少有两个元素
+        if (n < 2) {
+            return 0D;
+        }
+        double Ex = xs.stream().mapToDouble(x -> x).sum();
+        double Ey = ys.stream().mapToDouble(y -> y).sum();
+        double Ex2 = xs.stream().mapToDouble(x -> Math.pow(x, 2)).sum();
+        double Ey2 = ys.stream().mapToDouble(y -> Math.pow(y, 2)).sum();
+        double Exy = IntStream.range(0, n).mapToDouble(i -> xs.get(i) * ys.get(i)).sum();
+        double numerator = Exy - Ex * Ey / n;
+        double denominator = Math.sqrt((Ex2 - Math.pow(Ex, 2) / n) * (Ey2 - Math.pow(Ey, 2) / n));
+        if (denominator == 0) {
+            return 0D;
+        }
+        return numerator / denominator;
+    }
+}
+/**
+ * 推荐岗位（基于协同过滤推荐算法）
+ */
+public List<Position> recommend() {
+    Account currentUser = TokenUtils.getCurrentUser();
+    // 1. 获取所有的用户信息
+    List<User> users = userMapper.selectAll(new User());
+    // 2. 获取所有的岗位信息
+    List<Position> positions = positionMapper.selectAll(new Position());
+    // 3. 获取所有的收藏信息
+    List<Collect> collects = collectMapper.selectAll(new Collect());
+    // 4. 获取所有的投递信息
+    List<Submit> submits = submitMapper.selectAll(new Submit());
+    // 存储所有的用户和所有的岗位之间的相关性指数的数据
+    List<RelateDTO> data = new ArrayList<>();
+    // 开始计算所有用户和所有岗位之间的相关性指数的数据
+    for (Position position : positions) {
+        Integer positionId = position.getId();
+        for (User user : users) {
+            Integer userId = user.getId();
+            int index = 1;
+            // 如果该用户收藏过该岗位，我们权重给他 1
+            List<Collect> collectList = collects.stream()
+                    .filter(x -> x.getPositionId().equals(positionId) && x.getStudentId().equals(userId))
+                    .collect(Collectors.toList());
+            if (CollectionUtil.isNotEmpty(collectList)) {
+                index += 1;
+            }
+            // 如果该用户投递过该岗位，我们权重给他 2
+            List<Submit> submitList = submits.stream()
+                    .filter(x -> x.getPositionId().equals(positionId) && x.getUserId().equals(userId))
+                    .collect(Collectors.toList());
+            if (CollectionUtil.isNotEmpty(submitList)) {
+                index += 2;
+            }
+            if (index > 1) {
+                RelateDTO relateDTO = new RelateDTO(userId, positionId, index);
+                data.add(relateDTO);
+            }
+        }
+    }
+    // 调用基于用户行为的UserCF的推荐方法获取到被推荐的岗位的id的list
+    List<Integer> positionIds = UserCF.recommend(currentUser.getId(), data);
+    // 把list里对应的岗位id变成岗位信息
+    List<Position>result=positions.stream().filter(x-> positionIds.contains(x.getId())).collect(Collectors.toList());
+    // 如果这个推荐出来的list是空的
+    if (CollectionUtil.isEmpty(result)) {
+        result = getRandomPositions(3, positions, null);
+    }
+    // 如果推荐的数据不够3个
+    if (result.size() < 3) {
+        result.addAll(getRandomPositions(3 - result.size(), positions, result));
+    }
+    extracted(result);
+    return result;
+}
+public List<Position> getRandomPositions(int num, List<Position> positions, List<Position> result) {
+    Collections.shuffle(positions);
+    if (CollectionUtil.isNotEmpty(result)) {
+        positions = positions.stream().filter(x -> !result.contains(x)).collect(Collectors.toList());
+    }
+    return positions.size() > num ? positions.subList(0, num) : positions;
+}
